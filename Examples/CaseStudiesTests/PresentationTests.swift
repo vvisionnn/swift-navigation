@@ -3,6 +3,75 @@ import XCTest
 
 final class PresentationTests: XCTestCase {
   @MainActor
+  func testPresents_UnexpectedDismiss() async throws {
+    let vc = StackPresentationViewController(model: .init())
+    try await setUp(controller: vc)
+    await assertEventuallyNil(vc.presentedViewController)
+    
+    // present sheet
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.sheet = .init(level: 1)
+    }
+    await assertEventuallyNotNil(vc.presentedViewController, timeout: 2)
+    
+    // dismiss sheet and show fullscreen
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.sheet = nil
+      vc.model.root.fullScreen = .init(level: 1)
+    }
+    await assertEventuallyNotNil(vc.presentedViewController, timeout: 2)
+    
+    // let fullscreen child present another sheet
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen?.sheet = .init(level: 2)
+    }
+    await assertEventuallyNotNil(vc.presentedViewController?.presentedViewController, timeout: 2)
+    
+    // dismiss top level sheet, show top leve full screen
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen?.sheet = nil
+      vc.model.root.fullScreen?.fullScreen = .init(level: 2)
+    }
+    await assertEventuallyNotNil(vc.presentedViewController?.presentedViewController, timeout: 2)
+    
+    // repeat for another level
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen?.fullScreen?.sheet = .init(level: 3)
+    }
+    await assertEventuallyNotNil(vc.presentedViewController?.presentedViewController?.presentedViewController, timeout: 2)
+    
+    // dismiss top level sheet, show top leve full screen
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen?.fullScreen?.sheet = nil
+      vc.model.root.fullScreen?.fullScreen?.fullScreen = .init(level: 3)
+    }
+    await assertEventuallyNotNil(vc.presentedViewController?.presentedViewController?.presentedViewController, timeout: 2)
+    
+    try await Task.sleep(nanoseconds: 2000000000)
+    
+    // dismiss top level full screen
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen?.fullScreen?.fullScreen = nil
+    }
+    await assertEventuallyNil(vc.presentedViewController?.presentedViewController?.presentedViewController, timeout: 2)
+    try await Task.sleep(nanoseconds: 2000000000)
+    
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen?.fullScreen = nil
+    }
+    await assertEventuallyNil(vc.presentedViewController?.presentedViewController, timeout: 2)
+    try await Task.sleep(nanoseconds: 2000000000)
+    
+    withUITransaction(\.uiKit.disablesAnimations, false) {
+      vc.model.root.fullScreen = nil
+    }
+    await assertEventuallyNil(vc.presentedViewController, timeout: 2)
+    try await Task.sleep(nanoseconds: 1000000000)
+    
+    
+  }
+  
+  @MainActor
   func testPresents_IsPresented() async throws {
     let vc = BasicViewController()
     try await setUp(controller: vc)
@@ -526,5 +595,100 @@ private class BasicViewController: UIViewController {
     navigationDestination(item: $model.pushedChild) { model in
       BasicViewController(model: model)
     }
+  }
+}
+
+@Observable
+final class PresentationModel: Identifiable {
+  var level: UInt = 0
+  var sheet: PresentationModel? = nil
+  var fullScreen: PresentationModel? = nil
+  
+  init(level: UInt, sheet: PresentationModel? = nil, fullScreen: PresentationModel? = nil) {
+    self.level = level
+    self.sheet = sheet
+    self.fullScreen = fullScreen
+  }
+}
+
+final class PresentationViewController: UIViewController {
+  @UIBindable var model: PresentationModel
+  var isPresenting = false
+  
+  init(model: PresentationModel) {
+    self.model = model
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func viewDidLoad() {
+    self.view.backgroundColor = [
+      UIColor.systemOrange,
+      UIColor.systemGreen,
+      UIColor.systemBlue,
+      UIColor.systemYellow,
+    ].randomElement()
+    
+    let levelLabel = UILabel(frame: .zero)
+    levelLabel.textColor = .label
+    
+    self.view.addSubview(levelLabel)
+    levelLabel.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      levelLabel.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
+      levelLabel.centerYAnchor.constraint(equalTo: self.view.centerYAnchor),
+    ])
+    
+    observe { [weak self] in
+      levelLabel.text = "Level: \(self?.model.level ?? 0)"
+    }
+    
+    self.present(item: $model.sheet) { [weak self] in
+      self?.isPresenting = false
+    } content: { [weak self] sheetModel in
+      self?.isPresenting = true
+      let vc = PresentationViewController(model: sheetModel)
+      vc.modalPresentationStyle = .pageSheet
+      return vc
+    }
+    
+    self.present(item: $model.fullScreen) { [weak self] in
+      self?.isPresenting = false
+    } content: { [weak self] fullScreenModel in
+      self?.isPresenting = true
+      let vc = PresentationViewController(model: fullScreenModel)
+      vc.modalPresentationStyle = .overFullScreen
+      return vc
+    }
+  }
+}
+
+@Observable
+class StackPresentationModel {
+  var root: PresentationModel = .init(level: 0)
+  var path: [Path] = []
+
+  @CasePathable
+  enum Path {
+    case page
+  }
+}
+
+final class StackPresentationViewController: NavigationStackController {
+  var model: StackPresentationModel!
+  convenience init(model: StackPresentationModel) {
+    @UIBindable var model = model
+    self.init(
+      navigationBarClass: nil,
+      toolbarClass: nil,
+      path: $model.path,
+      root: {
+        PresentationViewController(model: model.root)
+      }
+    )
+    self.model = model
   }
 }
